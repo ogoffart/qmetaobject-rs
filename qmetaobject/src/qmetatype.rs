@@ -19,7 +19,8 @@ use super::*;
 
 fn register_metatype_common<T: QMetaType>(
     name: *const std::os::raw::c_char,
-    gadget_metaobject: *const QMetaObject,
+    metaobject: *const QMetaObject,
+    is_enum: bool,
 ) -> i32 {
     use std::any::TypeId;
     use std::collections::{HashMap, HashSet};
@@ -71,12 +72,14 @@ fn register_metatype_common<T: QMetaType>(
         let name = name.as_ptr();
         let type_id = cpp!(unsafe [name as "const char*", size as "int", deleter_fn as "QMetaType::Deleter",
                 creator_fn as "QMetaType::Creator", destructor_fn as "QMetaType::Destructor",
-                constructor_fn as "QMetaType::Constructor", gadget_metaobject as "const QMetaObject*"] -> i32 as "int" {
-            QMetaType::TypeFlags extraFlag(gadget_metaobject ? QMetaType::IsGadget : 0);
-            return QMetaType::registerType(gadget_metaobject ? gadget_metaobject->className() : name, deleter_fn, creator_fn, destructor_fn,
+                constructor_fn as "QMetaType::Constructor", metaobject as "const QMetaObject*",
+                is_enum as "bool"] -> i32 as "int" {
+            auto type_flag = is_enum ? QMetaType::IsEnumeration : QMetaType::IsGadget;
+            QMetaType::TypeFlags extraFlag(metaobject ? type_flag : 0);
+            return QMetaType::registerType(metaobject ? metaobject->className() : name, deleter_fn, creator_fn, destructor_fn,
                 constructor_fn, size,
                 QMetaType::NeedsConstruction | QMetaType::NeedsDestruction | QMetaType::MovableType | extraFlag,
-                gadget_metaobject);
+                metaobject);
         });
 
         if T::CONVERSION_TO_STRING.is_some() {
@@ -144,6 +147,46 @@ fn register_metatype_qobject<T: QObject>() -> i32 {
     }
 }
 
+pub fn register_metatype_qenum<T: QEnum + QMetaType>(
+    name: *const std::os::raw::c_char,
+) -> i32 {
+    register_metatype_common::<T>(name, T::static_meta_object(), true)
+}
+
+pub fn enum_to_qvariant<T: QEnum + QMetaType>(e: &T) -> QVariant {
+    let id: i32 = T::id();
+    let raw = e.to_raw();
+    let raw_ptr = &raw;
+    cpp!(unsafe [id as "int", raw_ptr as "const void*"] -> QVariant as "QVariant" {
+        return QVariant(id, raw_ptr);
+    })
+}
+
+fn qvariant_internal_ptr(var_ptr: *mut QVariant, id: i32) -> *const c_void {
+    cpp!(unsafe [var_ptr as "QVariant*", id as "int"] -> *const c_void as "const void*" {
+        return var_ptr->canConvert(id) && var_ptr->convert(id) ? var_ptr->constData() : nullptr;
+    })
+}
+
+pub fn enum_from_qvariant<T: QEnum + QMetaType>(mut variant: QVariant) -> Option<T> {
+    let id: i32 = T::id();
+    let var_ptr = &mut variant as *mut QVariant;
+    let ptr = qvariant_internal_ptr(var_ptr, id);
+    if ptr.is_null() {
+        None
+    } else {
+        let raw = unsafe{ *(ptr as *const T::Repr) };
+        T::from_raw(raw)
+    }
+}
+
+fn register_metatype_qmetatype<T: QMetaType>(
+    name: *const std::os::raw::c_char,
+    gadget_metaobject: *const QMetaObject,
+) -> i32 {
+    register_metatype_common::<T>(name, gadget_metaobject, false)
+}
+
 /// Implement this trait for type that should be known to the QMetaObject system
 ///
 /// Once implemented for a type, it can be used as a type of a qt_property! or
@@ -162,7 +205,7 @@ pub trait QMetaType: Clone + Default + 'static {
     ///
     /// The default implementation should work for most types
     fn register(name: Option<&std::ffi::CStr>) -> i32 {
-        register_metatype_common::<Self>(
+        register_metatype_qmetatype::<Self>(
             name.map_or(std::ptr::null(), |x| x.as_ptr()),
             std::ptr::null(),
         )
@@ -184,15 +227,13 @@ pub trait QMetaType: Clone + Default + 'static {
     fn from_qvariant(mut variant: QVariant) -> Option<Self> {
         let id: i32 = Self::id();
         let var_ptr = &mut variant as *mut QVariant;
-        unsafe {
-            let ptr = cpp!([var_ptr as "QVariant*", id as "int"] -> *const c_void as "const void*" {
-                return var_ptr->canConvert(id) && var_ptr->convert(id) ? var_ptr->constData() : nullptr;
-            });
-            if ptr.is_null() {
-                None
-            } else {
-                Some((*(ptr as *const Self)).clone())
-            }
+        let ptr = qvariant_internal_ptr(var_ptr, id);
+        if ptr.is_null() {
+            None
+        } else {
+            Some(unsafe {
+                (*(ptr as *const Self)).clone()
+            })
         }
     }
 
@@ -207,7 +248,7 @@ where
     T: Clone + Default + 'static,
 {
     fn register(name: Option<&std::ffi::CStr>) -> i32 {
-        register_metatype_common::<T>(
+        register_metatype_qmetatype::<T>(
             name.map_or(std::ptr::null(), |x| x.as_ptr()),
             T::static_meta_object(),
         )

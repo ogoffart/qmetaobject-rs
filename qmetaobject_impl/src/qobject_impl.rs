@@ -922,22 +922,29 @@ pub fn generate(input: TokenStream, is_qobject: bool) -> TokenStream {
     body.into()
 }
 
-fn is_valid_repr_attribute(attribute: &syn::Attribute) -> bool {
+fn attribute_to_repr(attribute: &syn::Attribute) -> Option<proc_macro2::TokenStream> {
     match attribute.parse_meta() {
         Ok(syn::Meta::List(list)) => {
             if list.ident == "repr" && list.nested.len() == 1 {
                 match &list.nested[0] {
                     syn::NestedMeta::Meta(syn::Meta::Word(word)) => {
-                        const ACCEPTABLES : &[&str; 6] = &["u8", "u16", "u32", "i8", "i16", "i32"];
-                        ACCEPTABLES.iter().any(|w| word == w)
+                        match &word.to_string()[..] {
+                            "u8" => Some(quote!{ u8 }),
+                            "u16" => Some(quote!{ u16 }),
+                            "u32" => Some(quote!{ u32 }),
+                            "i8" => Some(quote!{ i8 }),
+                            "i16" => Some(quote!{ i16 }),
+                            "i32" => Some(quote!{ i32 }),
+                            _ => None,
+                        }
                     }
-                    _ => false,
+                    _ => None,
                 }
             } else {
-                false
+                None
             }
         }
-        _ => false
+        _ => None,
     }
 }
 
@@ -946,30 +953,47 @@ pub fn generate_enum(input: TokenStream) -> TokenStream {
 
     let name = &ast.ident;
 
-    let mut is_repr_explicit = false;
+    let mut repr = None;
     for attr in &ast.attrs {
-        is_repr_explicit |= is_valid_repr_attribute(attr);
+        if let Some(r) = attribute_to_repr(attr) {
+            repr = Some(r);
+            break;
+        }
     }
-    if !is_repr_explicit {
-        panic!("#[derive(QEnum)] only support enum with explicit #[repr(*)], possible integer type are u8, u16, u32, i8, i16, i32.")
-    }
+    let repr = match repr {
+        Some(r) => r,
+        None => panic!("#[derive(QEnum)] only support enum with explicit #[repr(*)], possible integer type are u8, u16, u32, i8, i16, i32."),
+    };
 
     let crate_ = super::get_crate(&ast);
     let mut meta_enum = MetaEnum {
         name: name.clone(),
-        variants: Vec::new()
+        variants: Vec::new(),
     };
+
+    let mut from_raw_blocks = Vec::new();
+    let mut to_raw_blocks = Vec::new();
 
     if let syn::Data::Enum(ref data) = ast.data {
         for variant in data.variants.iter() {
             match &variant.fields {
                 syn::Fields::Unit => {}
                 // TODO report error with span
-                _ => panic!("#[derive(QEnum)] only support field-less enum")
+                _ => panic!("#[derive(QEnum)] only support field-less enum"),
             }
 
             let var_name = &variant.ident;
             meta_enum.variants.push(var_name.clone());
+
+            from_raw_blocks.push(quote! {
+                if raw == #name::#var_name as #repr {
+                    Some(#name::#var_name)
+                } else
+            });
+
+            to_raw_blocks.push(quote! {
+                #name::#var_name => #name::#var_name as #repr,
+            });
         }
     } else {
         panic!("#[derive(QEnum)] is only defined for enums, not for structs!");
@@ -998,8 +1022,21 @@ pub fn generate_enum(input: TokenStream) -> TokenStream {
         panic!("#[derive(QEnum)] is only defined for C enums, doesn't support generics");
     };
 
-    let body = quote!{
+    let body = quote! {
         impl #crate_::QEnum for #name {
+            type Repr = #repr;
+
+            fn from_raw(raw: Self::Repr) -> Option<Self> {
+                #(#from_raw_blocks)*
+                { None }
+            }
+
+            fn to_raw(&self) -> Self::Repr {
+                match self {
+                    #(#to_raw_blocks)*
+                }
+            }
+
             fn static_meta_object()->*const #crate_::QMetaObject {
                 #[cfg(target_pointer_width = "64")]
                 static STRING_DATA : &'static [u8] = & [ #(#str_data64),* ];
@@ -1007,6 +1044,22 @@ pub fn generate_enum(input: TokenStream) -> TokenStream {
                 static STRING_DATA : &'static [u8] = & [ #(#str_data32),* ];
                 static INT_DATA : &'static [u32] = & [ #(#int_data),* ];
                 #mo
+            }
+        }
+
+        impl #crate_::QMetaType for #name {
+            fn register(name: Option<&std::ffi::CStr>) -> i32 {
+                register_metatype_qenum::<Self>(
+                    name.map_or(std::ptr::null(), |x| x.as_ptr()),
+                )
+            }
+
+            fn to_qvariant(&self) -> QVariant {
+                #crate_::enum_to_qvariant::<#name>(self)
+            }
+
+            fn from_qvariant(mut variant: QVariant) -> Option<Self> {
+                #crate_::enum_from_qvariant::<#name>(variant)
             }
         }
     };

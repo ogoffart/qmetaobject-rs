@@ -606,47 +606,6 @@ fn panic_when_moved_setter() {
 }
 */
 
-#[derive(QEnum)]
-#[repr(u8)]
-enum MyEnum {
-    None,
-    First = 1,
-    Four = 4,
-}
-
-#[derive(QObject, Default)]
-struct MyEnumObject {
-    base: qt_base_class!(trait QObject),
-}
-
-#[test]
-fn enum_properties() {
-    qml_register_enum::<MyEnum>(
-        CStr::from_bytes_with_nul(b"MyEnumLib\0").unwrap(),
-        1,
-        0,
-        CStr::from_bytes_with_nul(b"MyEnum\0").unwrap(),
-    );
-    let my_obj = MyObject::default();
-    assert!(do_test(
-        my_obj,
-        "import MyEnumLib 1.0
-        Item {
-        function doTest() {
-            if(MyEnum.None != 0) {
-                return false;
-            }
-            if(MyEnum.First != 1) {
-                return false;
-            }
-            if(MyEnum.Four != 4) {
-                return false;
-            }
-            return true;
-        }}"
-    ));
-}
-
 #[test]
 fn threading() {
 
