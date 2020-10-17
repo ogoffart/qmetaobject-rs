@@ -76,6 +76,20 @@ fn builtin_type(ty: &syn::Type) -> u32 {
     }
 }
 
+trait IsVoid {
+    fn is_void(&self) -> bool;
+}
+
+impl IsVoid for syn::Type {
+    fn is_void(&self) -> bool {
+        if let syn::Type::Tuple(tuple) = self {
+            tuple.elems.is_empty()
+        } else {
+            false
+        }
+    }
+}
+
 fn write_u32(val: i32) -> [u8; 4] {
     [
         (val & 0xff) as u8,
@@ -532,6 +546,7 @@ pub fn generate(input: TokenStream, is_qobject: bool) -> TokenStream {
         quote! {
             let pinned = <#name #ty_generics as #crate_::QObject>::get_from_cpp(o);
             // FIXME: we should probably use borrow_mut here instead, but in a way which order re-entry
+            #[allow(unused_variables)]
             let mut obj = &mut *pinned.as_ptr();
 
             assert_eq!(o, obj.get_cpp_object(), "Internal pointer invalid");
@@ -552,6 +567,7 @@ pub fn generate(input: TokenStream, is_qobject: bool) -> TokenStream {
         }
     } else {
         quote! {
+            #[allow(unused_variables)]
             let mut obj = ::std::mem::transmute::<*mut ::std::os::raw::c_void, &mut #name #ty_generics>(o);
         }
     };
@@ -578,20 +594,6 @@ pub fn generate(input: TokenStream, is_qobject: bool) -> TokenStream {
                 };
             }
 
-            let register_type = if builtin_type(&prop.typ) == 0 {
-                let typ_str = typ.clone().into_token_stream().to_string();
-                let typ_str = typ_str.as_bytes();
-                quote! {
-                    #RegisterPropertyMetaType => unsafe {
-                        let r = *a as *mut i32;
-                        *r = <#typ as #crate_::PropertyType>::register_type(
-                            ::std::ffi::CStr::from_bytes_with_nul_unchecked(&[#(#typ_str ,)* 0u8]) );
-                    }
-                }
-            } else {
-                quote!{}
-            };
-
             let getter = if let Some(ref getter) = prop.getter {
                 let getter_ident: syn::Ident = getter.clone();
                 quote!{
@@ -614,19 +616,40 @@ pub fn generate(input: TokenStream, is_qobject: bool) -> TokenStream {
                 }
             };
 
-            quote! { #i => match c {
-                #ReadProperty => unsafe {
-                    #get_object
-                    #getter
-                },
-                #WriteProperty => unsafe {
-                    #get_object
-                    #setter
-                },
-                #ResetProperty => { /* TODO */},
-                #register_type
-                _ => {}
-            }}
+            // register properties of non-built-in types: stringify type's TokenStream
+            let register_type = if builtin_type(typ) == 0 {
+                let typ_str = typ.clone().into_token_stream().to_string();
+                let typ_str = typ_str.as_bytes();
+                quote! { /* externally defined variables: register_result. */
+                    // SAFETY: string generated from Rust type tokens should be a valid C string.
+                    let name = unsafe { ::std::ffi::CStr::from_bytes_with_nul_unchecked(&[#(#typ_str ,)* 0u8]) };
+                    *register_result = <#typ as #crate_::PropertyType>::register_type(name);
+                }
+            } else {
+                quote!{}
+            };
+
+            quote! {
+                #i => match c {
+                    #ReadProperty => unsafe {
+                        #get_object
+                        #getter
+                    },
+                    #WriteProperty => unsafe {
+                        #get_object
+                        #setter
+                    },
+                    #ResetProperty => {/* TODO */},
+                    #RegisterPropertyMetaType => {
+                         // a[0]: registerResult, should set to id of registered type or -1 if a type
+                         // could not be registered for any reason.
+                         // SAFETY: Qt always passes a valid pointer here.
+                        let register_result: &mut i32 = unsafe { &mut *((*a.offset(0)) as *mut i32) };
+                        #register_type
+                    },
+                    _ => {}
+                }
+            }
         })
         .collect();
 
@@ -644,28 +667,30 @@ pub fn generate(input: TokenStream, is_qobject: bool) -> TokenStream {
                     let i = i as isize;
                     let ty = &arg.typ;
                     quote! {
+                        // a[1..=N] are pointers to the arguments
+                        // References to the builtin types are reinterpreted as their Rust
+                        // counterparts using `builtin_type()` mapping.
                         (*(*(a.offset(#i + 1)) as *const #ty)).clone()
                     }
                 })
                 .collect();
 
-            fn is_void(ret_type: &syn::Type) -> bool {
-                if let syn::Type::Tuple(ref tuple) = ret_type {
-                    tuple.elems.is_empty()
-                } else {
-                    false
-                }
-            }
+            let call = quote! { obj.#method_name(#(#args_call),*) };
 
-            if is_void(&method.ret_type) {
-                quote! { #i => obj.#method_name(#(#args_call),*), }
+            if method.ret_type.is_void() {
+                quote! { #i => #call, }
             } else {
                 let ret_type = &method.ret_type;
-                let args_call2 = args_call.clone();
-                quote! { #i => {
-                        let r = *a as *mut #ret_type;
-                        if r.is_null() { obj.#method_name(#(#args_call),*); }
-                        else { *r = obj.#method_name(#(#args_call2),*); }
+                quote! {
+                    #i => {
+                        let r = #call;
+                        // a[0] is a pointer to the return value
+                        // SAFETY: pointer to the return value is guaranteed to exist in array `a`,
+                        // but it may be null if the caller is not interested in reading it.
+                        let return_value = unsafe { (*a.offset(0)) as *mut #ret_type };
+                        if let Some(return_ref) = unsafe { return_value.as_mut() } {
+                            *return_ref = r;
+                        }
                     }
                 }
             }
@@ -675,21 +700,26 @@ pub fn generate(input: TokenStream, is_qobject: bool) -> TokenStream {
     let register_arguments: Vec<_> = methods
         .iter()
         .enumerate()
-        .map(|(i, method)| {
-            let i = i as u32;
+        .map(|(fn_i, method)| {
+            let fn_i = fn_i as u32;
             let args: Vec<_> = method
                 .args
                 .iter()
                 .enumerate()
-                .map(|(i, arg)| {
-                    let i = i as u32;
-                    if builtin_type(&arg.typ) == 0 {
-                        let typ = &arg.typ;
-                        let typ_str = arg.typ.clone().into_token_stream().to_string();
+                .map(|(arg_i, arg)| {
+                    let arg_i = arg_i as u32;
+                    let typ = &arg.typ;
+                    // FIXME: there's minor code duplication with `property_meta_call`
+                    if builtin_type(&typ) == 0 {
+                        let typ_str = typ.clone().into_token_stream().to_string();
                         let typ_str = typ_str.as_bytes();
-                        quote! {
-                            #i => { unsafe { *(*a as *mut i32) = <#typ as #crate_::QMetaType>::register(
-                                Some(::std::ffi::CStr::from_bytes_with_nul_unchecked(&[#(#typ_str ,)* 0u8]))) }; }
+                        quote! { /* externally defined variables: arg_type, arg_index. */
+                            #arg_i => {
+                                // SAFETY: string generated from Rust type tokens should be a valid C string.
+                                let name = unsafe { ::std::ffi::CStr::from_bytes_with_nul_unchecked(&[#(#typ_str ,)* 0u8]) };
+                                let ty = <#typ as #crate_::QMetaType>::register(Some(name));
+                                ty
+                            }
                         }
                     } else {
                         quote!{}
@@ -697,12 +727,14 @@ pub fn generate(input: TokenStream, is_qobject: bool) -> TokenStream {
                 })
                 .collect();
 
-            quote! { #i => {
-                match unsafe { *(*(a.offset(1)) as *const u32) } {
-                    #(#args)*
-                    _ => {}
+            quote! { /* externally defined variables: arg_type, arg_index. */
+                #fn_i => {
+                    match arg_index {
+                        #(#args)*
+                        _ => -1, // default when type is unknown
+                    }
                 }
-            }}
+            }
         })
         .collect();
 
@@ -745,17 +777,21 @@ pub fn generate(input: TokenStream, is_qobject: bool) -> TokenStream {
         }
     }));
 
+    // Despite its name, it actually handles signals.
     let index_of_method = signals.iter().enumerate().map(|(i, signal)| {
         let sig_name = &signal.name;
-        // if *a[1] == offset_of(signal field)  =>  *a[0] = index and return.
-        quote! {
-            unsafe {
-                let null = ::std::ptr::null() as *const #name #ty_generics;
-                let offset = &(*null).#sig_name as *const _ as usize - (null as usize);
-                if (*(*(a.offset(1)) as *const usize)) == offset  {
-                    *(*a as *mut i32) = #i as i32;
-                    return;
-                }
+        // if signal == offset_of(signal field) then *result = index and return.
+        quote! { /* externally defined variables: signal, result. */
+            // SAFETY: no dereference of null pointer, only calculation of field's offset over
+            // imaginary struct located at null. In Rust null is 0, thus aligned for any type.
+            let offset = unsafe {
+                let base = ::std::ptr::null() as *const #name #ty_generics;
+                let field = (&(*base).#sig_name) as *const _ as usize;
+                field - (base as usize)
+            };
+            if signal == offset  {
+                *result = #i as i32;
+                return;
             }
         }
     });
@@ -768,14 +804,16 @@ pub fn generate(input: TokenStream, is_qobject: bool) -> TokenStream {
 
     let mo = if ast.generics.params.is_empty() {
         quote! {
-            qmetaobject_lazy_static! { static ref MO: #crate_::QMetaObject = #crate_::QMetaObject {
-                super_data: #base_meta_object,
-                string_data: STRING_DATA.as_ptr(),
-                data: INT_DATA.as_ptr(),
-                static_metacall: Some(static_metacall),
-                meta_types: ::std::ptr::null(),
-                extra_data: ::std::ptr::null(),
-            };};
+            qmetaobject_lazy_static! {
+                static ref MO: #crate_::QMetaObject = #crate_::QMetaObject {
+                    super_data: #base_meta_object,
+                    string_data: STRING_DATA.as_ptr(),
+                    data: INT_DATA.as_ptr(),
+                    static_metacall: Some(static_metacall),
+                    meta_types: ::std::ptr::null(),
+                    extra_data: ::std::ptr::null(),
+                };
+            };
             return &*MO;
         }
     } else {
@@ -811,7 +849,7 @@ pub fn generate(input: TokenStream, is_qobject: bool) -> TokenStream {
 
     let qobject_spec_func = if is_qobject {
         quote! {
-            fn get_cpp_object(&self)-> *mut ::std::os::raw::c_void {
+            fn get_cpp_object(&self) -> *mut ::std::os::raw::c_void {
                 self.#base_prop.get()
             }
 
@@ -874,6 +912,7 @@ pub fn generate(input: TokenStream, is_qobject: bool) -> TokenStream {
         quote! { QGadget }
     };
 
+
     let mut body = quote! {
         #[allow(non_snake_case)]
         impl #impl_generics #name #ty_generics #where_clause {
@@ -901,18 +940,36 @@ pub fn generate(input: TokenStream, is_qobject: bool) -> TokenStream {
                     a: *const *mut ::std::os::raw::c_void
                 ) #where_clause
                 {
-                    if c == #InvokeMetaMethod { unsafe {
-                        #get_object
-                        match idx {
-                            #(#method_meta_call)*
-                            _ => { let _ = obj; }
+                    if c == #InvokeMetaMethod {
+                        // a[0]: pointer to return value.
+                        // a[1..=10]: pointers to arg0..arg9.
+                        unsafe {
+                            #get_object
+                            match idx {
+                                #(#method_meta_call)*
+                                _ => {}
+                            }
                         }
-                    }} else if c == #IndexOfMethod {
+                    } else if c == #IndexOfMethod {
+                        // a[0]: pointer to an index of the method, return value.
+                        let result: &mut i32 = unsafe { &mut *((*a.offset(0)) as *mut i32) };
+                        // a[1]: pointer to raw signal representation (in our case it's field's offset).
+                        // SAFETY: Qt never passes us signal representations of other classes, so
+                        // it is guaranteed that this representation was generated by our code,
+                        // thus known to be safe.
+                        let signal: usize = unsafe { *((*a.offset(1)) as *const usize) };
                         #(#index_of_method)*
                     } else if c == #RegisterMethodArgumentMetaType {
-                        match idx {
+                        // a[0]: pointer to type of the argument at given index, return value.
+                        // SAFETY: Qt always passes a valid pointer here, but it is 'out' parameter,
+                        // thus may not be initialized and must not be read from.
+                        let arg_type: &mut i32 = unsafe { &mut *((*a.offset(0)) as *mut i32) };
+                        // a[1]: pointer to index of the requested argument.
+                        // SAFETY: Qt always passes a valid pointer here and checks that index is >= 0.
+                        let arg_index: u32 = unsafe { *((*a.offset(1)) as *const u32) };
+                        *arg_type = match idx {
                             #(#register_arguments)*
-                            _ => {}
+                            _ => -1, // default when type is unknown
                         }
                     } else {
                         match idx {
@@ -929,7 +986,6 @@ pub fn generate(input: TokenStream, is_qobject: bool) -> TokenStream {
         }
 
     };
-
     if is_plugin {
         use crate::qbjs::Value;
         let mut object_data: Vec<(&'static str, Value)> = vec![
@@ -943,7 +999,9 @@ pub fn generate(input: TokenStream, is_qobject: bool) -> TokenStream {
 
         let plugin_data = qbjs::serialize(&object_data);
         let plugin_data_size = plugin_data.len();
-        body = quote! { #body
+        body = quote! {
+            #body
+
             #[link_section = ".qtmetadata"]
             #[no_mangle]
             #[allow(non_upper_case_globals)]
@@ -974,8 +1032,8 @@ fn is_valid_repr_attribute(attribute: &syn::Attribute) -> bool {
             if list.path.is_ident("repr") && list.nested.len() == 1 {
                 match &list.nested[0] {
                     syn::NestedMeta::Meta(syn::Meta::Path(word)) => {
-                        const ACCEPTABLES: &[&str] = &["u8", "u16", "u32", "i8", "i16", "i32"];
-                        ACCEPTABLES.iter().any(|w| word.is_ident(w))
+                        const ACCEPTABLE_TYPES: &[&str] = &["u8", "u16", "u32", "i8", "i16", "i32"];
+                        ACCEPTABLE_TYPES.iter().any(|w| word.is_ident(w))
                     }
                     _ => false,
                 }
@@ -1028,14 +1086,16 @@ pub fn generate_enum(input: TokenStream) -> TokenStream {
 
     let mo = if ast.generics.params.is_empty() {
         quote! {
-            qmetaobject_lazy_static! { static ref MO: #crate_::QMetaObject = #crate_::QMetaObject {
-                super_data: ::std::ptr::null(),
-                string_data: STRING_DATA.as_ptr(),
-                data: INT_DATA.as_ptr(),
-                static_metacall: None,
-                meta_types: ::std::ptr::null(),
-                extra_data: ::std::ptr::null(),
-            };};
+            qmetaobject_lazy_static! {
+                static ref MO: #crate_::QMetaObject = #crate_::QMetaObject {
+                    super_data: ::std::ptr::null(),
+                    string_data: STRING_DATA.as_ptr(),
+                    data: INT_DATA.as_ptr(),
+                    static_metacall: None,
+                    meta_types: ::std::ptr::null(),
+                    extra_data: ::std::ptr::null(),
+                };
+            };
             return &*MO;
         }
     } else {
