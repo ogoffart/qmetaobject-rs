@@ -120,6 +120,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #![cfg_attr(no_qt, allow(unused))]
 
 use std::convert::From;
+use std::ffi::CStr;
 use std::fmt::Display;
 use std::iter::FromIterator;
 use std::ops::{Index, IndexMut};
@@ -663,6 +664,8 @@ impl std::fmt::Debug for QString {
     }
 }
 
+// XXX: The Default, Clone and Copy traits are provided by cpp_class! but they won't have these
+// nice "Wrapper around ..." docs with links on them. How can we fix this?
 cpp_class!(
     /// Wrapper around [`QVariant`][class] class.
     ///
@@ -670,15 +673,95 @@ cpp_class!(
     #[derive(PartialEq)]
     pub unsafe struct QVariant as "QVariant"
 );
+// methods are ordered as in the official documentation
 impl QVariant {
-    /// Wrapper around [`toByteArray()`][method] method.
+    /// Wrapper around [`canConvert(int targetTypeId)`][method] method.
     ///
-    /// [method]: https://doc.qt.io/qt-5/qvariant.html#toByteArray
-    pub fn to_qbytearray(&self) -> QByteArray {
-        cpp!(unsafe [self as "const QVariant*"] -> QByteArray as "QByteArray" {
-            return self->toByteArray();
+    /// [method]: https://doc.qt.io/qt-5/qvariant.html#canConvert
+    pub fn can_convert(&self, target_type_id: i32) -> bool {
+        cpp!(unsafe [self as "const QVariant*", target_type_id as "int"] -> bool as "bool" {
+            return self->canConvert(target_type_id);
         })
     }
+
+    // TODO: for this to work, we need QMetaType be available in qttypes package.
+    // TODO: It would create a dependency cycle at this point.
+    // /// Wrapper around [`canConvert()`][method] method.
+    // ///
+    // /// [method]: https://doc.qt.io/qt-5/qvariant.html#canConvert-1
+    // pub fn can_convert<T: QMetaType>(&self) -> bool {
+    //     self.can_convert(T::id())
+    // }
+
+    /// Wrapper around [`clear()`][method] method.
+    ///
+    /// [method]: https://doc.qt.io/qt-5/qvariant.html#clear
+    pub fn clear(&mut self) {
+        cpp!(unsafe [self as "QVariant*"] {
+            self->clear();
+        });
+    }
+
+    /// Wrapper around [`convert(int targetTypeId)`][method] method.
+    ///
+    /// [method]: https://doc.qt.io/qt-5/qvariant.html#convert
+    pub fn convert(&mut self, target_type_id: i32) -> bool {
+        cpp!(unsafe [self as "QVariant*", target_type_id as "int"] -> bool as "bool" {
+            return self->convert(target_type_id);
+        })
+    }
+
+    // TODO?: [static] template <typename Types> QVariant QVariant::fromStdVariant(const std::variant<Types...> &value)
+    // TODO: [static] template <typename T> QVariant QVariant::fromValue(const T &value)
+    // TODO: template <typename T> void QVariant::setValue(const T &value)
+    // either needs compile-time resolution of QMetaType for the T, which requires QMetaType to be
+    // available is this package.
+    // /// Wrapper around [`setValue(const T &value)`][method] method.
+    // ///
+    // /// [method]: https://doc.qt.io/qt-5/qvariant.html#setValue
+    // pub fn set_value<T: QMetaType>(&mut self, value: &T) {
+    //     // we have to convert value to some runtime-static type in Rust,
+    //     // because generic T won't fit through FFI boundaries.
+    //     let var = value.to_qvariant();
+    //     cpp!(unsafe [self as "QVariant*", value as "QVariant"] {
+    //         self->setValue(value);
+    //     });
+    // }
+
+    /// Wrapper around [`isNull()`][method] method.
+    ///
+    /// [method]: https://doc.qt.io/qt-5/qvariant.html#isNull
+    pub fn is_null(&self) -> bool {
+        cpp!(unsafe [self as "const QVariant*"] -> bool as "bool" {
+            return self->isNull();
+        })
+    }
+
+    /// Wrapper around [`isValid()`][method] method.
+    ///
+    /// [method]: https://doc.qt.io/qt-5/qvariant.html#isValid
+    pub fn is_valid(&self) -> bool {
+        cpp!(unsafe [self as "const QVariant*"] -> bool as "bool" {
+            return self->isValid();
+        })
+    }
+
+    // XXX: for setValue() see fromValue() comment above.
+
+    /// Wrapper around [`swap(QVariant &other)`][method] method.
+    ///
+    /// [method]: https://doc.qt.io/qt-5/qvariant.html#swap
+    pub fn swap(&mut self, other: &mut QVariant) {
+        // XXX: can't we just std::mem::swap() here?
+        cpp!(unsafe [self as "QVariant*", other as "QVariant*"] {
+            // dereferencing because cpp! macro passes arguments as references,
+            // which adds one layer of indirection.
+            QVariant &that = *other;
+            self->swap(that);
+        });
+    }
+
+    // TODO: toBitArray(), requires QBitArray wrapper
 
     /// Wrapper around [`toBool()`][method] method.
     ///
@@ -689,6 +772,265 @@ impl QVariant {
         })
     }
 
+    /// Wrapper around [`toByteArray()`][method] method.
+    ///
+    /// [method]: https://doc.qt.io/qt-5/qvariant.html#toByteArray
+    pub fn to_qbytearray(&self) -> QByteArray {
+        cpp!(unsafe [self as "const QVariant*"] -> QByteArray as "QByteArray" {
+            return self->toByteArray();
+        })
+    }
+
+    /// Returns the variant as a Rust's native [`Vec`]`<`[`u8`]`>` if the variant is supported by
+    /// [`to_qbytearray()`] method, otherwise returns an empty vector.
+    ///
+    /// Unlike [`to_qbytearray()`] which might use [implicit sharing] (copy-on-write), this method
+    /// always allocates memory for a [`Vec`].
+    ///
+    /// [`to_qbytearray()`]: Self::to_qbytearray()
+    /// [implicit sharing]: https://doc.qt.io/qt-5/implicit-sharing.html
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let bytearray = self.to_qbytearray();
+        bytearray.to_slice().to_vec()
+    }
+
+    // TODO: toChar(), requires QChar wrapper
+
+    /// Wrapper around [`toDate()`][method] method.
+    ///
+    /// [method]: https://doc.qt.io/qt-5/qvariant.html#toDate
+    pub fn to_date(&self) -> QDate {
+        cpp!(unsafe [self as "const QVariant*"] -> QDate as "QDate" {
+            return self->toDate();
+        })
+    }
+
+    /// Wrapper around [`toDateTime()`][method] method.
+    ///
+    /// [method]: https://doc.qt.io/qt-5/qvariant.html#toDateTime
+    pub fn to_date_time(&self) -> QDateTime {
+        cpp!(unsafe [self as "const QVariant*"] -> QDateTime as "QDateTime" {
+            return self->toDateTime();
+        })
+    }
+
+    /// Wrapper around [`toDouble(bool *ok)`][method] method.
+    ///
+    /// [method]: https://doc.qt.io/qt-5/qvariant.html#toDouble
+    pub fn to_double(&self) -> Option<f64> {
+        let mut ok = false;
+        let result = cpp!(unsafe [self as "const QVariant*", mut ok as "bool"] -> f64 as "double" {
+            return self->toDouble(&ok);
+        });
+        if ok { Some(result) } else { None }
+    }
+
+    /// Wrapper around [`toFloat(bool *ok)`][method] method.
+    ///
+    /// [method]: https://doc.qt.io/qt-5/qvariant.html#toFloat
+    pub fn to_float(&self) -> Option<f32> {
+        let mut ok = false;
+        let result = cpp!(unsafe [self as "const QVariant*", mut ok as "bool"] -> f32 as "float" {
+            return self->toFloat(&ok);
+        });
+        if ok { Some(result) } else { None }
+    }
+
+    // TODO: toHash(), requires QHash wrapper
+
+    /// Wrapper around [`toInt(bool *ok)`][method] method.
+    ///
+    /// [method]: https://doc.qt.io/qt-5/qvariant.html#toInt
+    pub fn to_int(&self) -> Option<i32> {
+        let mut ok: bool = false;
+        let result = cpp!(unsafe [self as "const QVariant*", mut ok as "bool"] -> i32 as "int" {
+            return self->toInt(&ok);
+        });
+        if ok { Some(result) } else { None }
+    }
+
+    // TODO: toJson*(), requires a bunch of QJson* wrappers
+    // TODO: toLine(), requires QLine wrapper
+    // TODO: toLineF(), requires QLineF wrapper
+
+    /// Wrapper around [`toList()`][method] method.
+    ///
+    /// [method]: https://doc.qt.io/qt-5/qvariant.html#toList
+    pub fn to_list(&self) -> QVariantList {
+        cpp!(unsafe [self as "const QVariant*"] -> QVariantList as "QVariantList" {
+            return self->toList();
+        })
+    }
+
+    // TODO: toLocale(), requires QLocale wrapper
+
+    /// Wrapper around [`toLongLong()`][method] method.
+    ///
+    /// [method]: https://doc.qt.io/qt-5/qvariant.html#toLongLong
+    pub fn to_longlong(&self) -> Option<i64> {
+        let mut ok: bool = false;
+        let result = cpp!(unsafe [self as "const QVariant*", mut ok as "bool"] -> i64 as "qlonglong" {
+            return self->toLongLong(&ok);
+        });
+        if ok { Some(result) } else { None }
+    }
+
+    // TODO: toMap(), requires QMap
+
+    /// Wrapper around [`toModelIndex()`][method] method.
+    ///
+    /// [method]: https://doc.qt.io/qt-5/qvariant.html#toModelIndex
+    pub fn to_model_index(&self) -> QModelIndex {
+        cpp!(unsafe [self as "const QVariant*"] -> QModelIndex as "QModelIndex" {
+            return self->toModelIndex();
+        })
+    }
+
+    // TODO: toPersistentModelIndex(), requires QPersistentModelIndex wrapper
+    // XXX toPoint(), toPointF()
+
+    /// Wrapper around [`toReal(bool *ok)`][method] method.
+    ///
+    /// [method]: https://doc.qt.io/qt-5/qvariant.html#toReal
+    pub fn to_real(&self) -> Option<qreal> {
+        let mut ok = false;
+        let result = cpp!(unsafe [self as "const QVariant*", mut ok as "bool"] -> qreal as "qreal" {
+            return self->toReal(&ok);
+        });
+        if ok { Some(result) } else { None }
+    }
+
+    // XXX: toRect(), toRectF()
+
+    // TODO: toRegExp() and toRegularExpression(), requires QRegExp and QRegularExpression wrappers
+
+    /// Wrapper around [`toSize()`][method] method.
+    ///
+    /// [method]: https://doc.qt.io/qt-5/qvariant.html#toSize
+    pub fn to_size(&self) -> QSize {
+        cpp!(unsafe [self as "const QVariant*"] -> QSize as "QSize" {
+            return self->toSize();
+        })
+    }
+
+    /// Wrapper around [`toSizeF()`][method] method.
+    ///
+    /// [method]: https://doc.qt.io/qt-5/qvariant.html#toSizeF
+    pub fn to_size_f(&self) -> QSizeF {
+        cpp!(unsafe [self as "const QVariant*"] -> QSizeF as "QSizeF" {
+            return self->toSizeF();
+        })
+    }
+
+    /// Wrapper around [`toString()`][method] method.
+    ///
+    /// [method]: https://doc.qt.io/qt-5/qvariant.html#toString
+    pub fn to_qstring(&self) -> QString {
+        cpp!(unsafe [self as "const QVariant*"] -> QString as "QString" {
+            return self->toString();
+        })
+    }
+
+    /// Returns the variant as a Rust's native [`String`] if the variant is supported by
+    /// [`to_qstring()`] method, otherwise returns an empty string.
+    ///
+    /// Unlike [`to_qstring()`] which might use [implicit sharing] (copy-on-write), this method
+    /// allocates Rust [`String`], and converts from Qt's native UTF-16 string encoding.
+    ///
+    /// [`to_qstring()`]: Self::to_qstring()
+    /// [implicit sharing]: https://doc.qt.io/qt-5/implicit-sharing.html
+    pub fn to_string(&self) -> String {
+        self.to_qstring().into()
+    }
+
+    // TODO: toStringList(), requires QStringList wrapper
+
+    /// Wrapper around [`toTime()`][method] method.
+    ///
+    /// [method]: https://doc.qt.io/qt-5/qvariant.html#toTime
+    pub fn to_time(&self) -> QTime {
+        cpp!(unsafe [self as "const QVariant*"] -> QTime as "QTime" {
+            return self->toTime();
+        })
+    }
+
+    /// Wrapper around [`toUInt(bool *ok)`][method] method.
+    ///
+    /// [method]: https://doc.qt.io/qt-5/qvariant.html#toUInt
+    pub fn to_uint(&self) -> Option<u32> {
+        let mut ok: bool = false;
+        let result = cpp!(unsafe [self as "const QVariant*", mut ok as "bool"] -> u32 as "uint" {
+            return self->toUInt(&ok);
+        });
+        if ok { Some(result) } else { None }
+    }
+
+    /// Wrapper around [`toULongLong(bool *ok)`][method] method.
+    ///
+    /// [method]: https://doc.qt.io/qt-5/qvariant.html#toULongLong
+    pub fn to_ulonglong(&self) -> Option<u64> {
+        let mut ok: bool = false;
+        let result = cpp!(unsafe [self as "const QVariant*", mut ok as "bool"] -> u64 as "qulonglong" {
+            return self->toULongLong(&ok);
+        });
+        if ok { Some(result) } else { None }
+    }
+
+    /// Wrapper around [`toUrl()`][method] method.
+    ///
+    /// [method]: https://doc.qt.io/qt-5/qvariant.html#toUrl
+    pub fn to_url(&self) -> QUrl {
+        cpp!(unsafe [self as "const QVariant*"] -> QUrl as "QUrl" {
+            return self->toUrl();
+        })
+    }
+
+    // TODO: toUuid(), requires QUuid wrapper
+
+    // TODO: QVariant::Type QVariant::type() const
+    // requires either obsolete QVariant::Type, or its replacement QMetaType::Type.
+
+    /// Wrapper around [`typeName()`][method] method.
+    ///
+    /// # Wrapper-specific
+    ///
+    /// Once registered, meta type can not be unloaded. Thus, its metadata effectively becomes
+    /// valid for the rest of the program run time, i.e. for `'static` lifetime.
+    ///
+    /// [`CStr`] can not represent null pointers, so instead [`Option::None`] is used
+    /// for Invalid variants.
+    ///
+    /// [method]: https://doc.qt.io/qt-5/qvariant.html#typeName
+    pub fn type_name(&self) -> Option<&'static CStr> {
+        let ptr = cpp!(unsafe [self as "const QVariant*"] -> *const c_char as "const char*" {
+            return self->typeName();
+        });
+        if ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { CStr::from_ptr(ptr) })
+        }
+    }
+
+    /// Wrapper around [`typeToName(int typeId)`][static member] static member.
+    ///
+    /// # Wrapper-specific
+    ///
+    /// See wrapper-specific notes on [`type_name()`].
+    ///
+    /// [static member]: https://doc.qt.io/qt-5/qvariant.html#typeToName
+    /// [`type_name()`]: Self::type_name()
+    pub fn type_to_name(type_id: i32) -> Option<&'static CStr> {
+        let ptr = cpp!(unsafe [type_id as "int"] -> *const c_char as "const char*" {
+            return QVariant::typeToName(type_id);
+        });
+        if ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { CStr::from_ptr(ptr) })
+        }
+    }
+
     /// Wrapper around [`userType()`][method] method.
     ///
     /// [method]: https://doc.qt.io/qt-5/qvariant.html#userType
@@ -697,45 +1039,83 @@ impl QVariant {
             return self->userType();
         })
     }
-
-    // FIXME: do more wrappers
 }
-impl From<QString> for QVariant {
-    /// Wrapper around [`QVariant(const QString &)`][ctor] constructor.
+// single argument constructors are ordered as in the official documentation
+// TODO: QVariant::QVariant(const QPersistentModelIndex &val)
+impl From<QModelIndex> for QVariant {
+    /// Wrapper around [`QVariant(const QModelIndex &)`][ctor] constructor.
     ///
-    /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-14
-    fn from(a: QString) -> QVariant {
-        cpp!(unsafe [a as "QString"] -> QVariant as "QVariant" {
+    /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-42
+    fn from(a: QModelIndex) -> Self {
+        cpp!(unsafe [a as "QModelIndex"] -> QVariant as "QVariant" {
             return QVariant(a);
         })
     }
 }
-impl From<QByteArray> for QVariant {
-    /// Wrapper around [`QVariant(const QByteArray &)`][ctor] constructor.
+// TODO: QVariant::QVariant(const QJson{Document,Array,Object,Value} &val)
+impl From<QUrl> for QVariant {
+    /// Wrapper around [`QVariant(const QUrl &)`][ctor] constructor.
     ///
-    /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-12
-    fn from(a: QByteArray) -> QVariant {
-        cpp!(unsafe [a as "QByteArray"] -> QVariant as "QVariant" {
+    /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-35
+    fn from(a: QUrl) -> Self {
+        cpp!(unsafe [a as "QUrl"] -> QVariant as "QVariant" {
             return QVariant(a);
         })
     }
 }
-impl From<QDate> for QVariant {
-    /// Wrapper around [`QVariant(const QDate &)`][ctor] constructor.
+// TODO: QVariant::QVariant(const QUuid &val)
+// TODO: QVariant::QVariant(const QEasingCurve &val)
+// TODO: QVariant::QVariant(const {QRegularExpression,QRegExp} &re)
+// TODO: QVariant::QVariant(const QLocale &l)
+// TODO: QVariant::QVariant(const QRect{,F} &val)
+// TODO: QVariant::QVariant(const QLine{,F} &val)
+impl From<QPointF> for QVariant {
+    /// Wrapper around [`QVariant(const QPointF &val)`][ctor] constructor.
     ///
-    /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-18
-    fn from(a: QDate) -> QVariant {
-        cpp!(unsafe [a as "QDate"] -> QVariant as "QVariant" {
+    /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-27
+    fn from(a: QPointF) -> Self {
+        cpp!(unsafe [a as "QPointF"] -> QVariant as "QVariant" {
             return QVariant(a);
         })
     }
 }
-impl From<QTime> for QVariant {
-    /// Wrapper around [`QVariant(const QTime &)`][ctor] constructor.
+impl From<QPoint> for QVariant {
+    /// Wrapper around [`QVariant(const QPoint &val)`][ctor] constructor.
     ///
-    /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-19
-    fn from(a: QTime) -> QVariant {
-        cpp!(unsafe [a as "QTime"] -> QVariant as "QVariant" {
+    /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-26
+    fn from(a: QPoint) -> Self {
+        cpp!(unsafe [a as "QPoint"] -> QVariant as "QVariant" {
+            return QVariant(a);
+        })
+    }
+}
+impl From<QSizeF> for QVariant {
+    /// Wrapper around [`QVariant(const QSizeF &val)`][ctor] constructor.
+    ///
+    /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-25
+    fn from(a: QSizeF) -> Self {
+        cpp!(unsafe [a as "QSizeF"] -> QVariant as "QVariant" {
+            return QVariant(a);
+        })
+    }
+}
+impl From<QSize> for QVariant {
+    /// Wrapper around [`QVariant(const QSize &val)`][ctor] constructor.
+    ///
+    /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-24
+    fn from(a: QSize) -> Self {
+        cpp!(unsafe [a as "QSize"] -> QVariant as "QVariant" {
+            return QVariant(a);
+        })
+    }
+}
+// TODO: QVariant::QVariant(const {QHash,QMap}<QString, QVariant> &val)
+impl From<QVariantList> for QVariant {
+    /// Wrapper around [`QVariant(const QList<QVariant> &val)`][ctor] constructor.
+    ///
+    /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-21
+    fn from(a: QVariantList) -> Self {
+        cpp!(unsafe [a as "QVariantList"] -> QVariant as "QVariant" {
             return QVariant(a);
         })
     }
@@ -744,69 +1124,65 @@ impl From<QDateTime> for QVariant {
     /// Wrapper around [`QVariant(const QDateTime &)`][ctor] constructor.
     ///
     /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-20
-    fn from(a: QDateTime) -> QVariant {
+    fn from(a: QDateTime) -> Self {
         cpp!(unsafe [a as "QDateTime"] -> QVariant as "QVariant" {
             return QVariant(a);
         })
     }
 }
-impl From<QUrl> for QVariant {
-    /// Wrapper around [`QVariant(const QUrl &)`][ctor] constructor.
+impl From<QTime> for QVariant {
+    /// Wrapper around [`QVariant(const QTime &)`][ctor] constructor.
     ///
-    /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-35
-    fn from(a: QUrl) -> QVariant {
-        cpp!(unsafe [a as "QUrl"] -> QVariant as "QVariant" {
+    /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-19
+    fn from(a: QTime) -> Self {
+        cpp!(unsafe [a as "QTime"] -> QVariant as "QVariant" {
             return QVariant(a);
         })
     }
 }
-impl From<QVariantList> for QVariant {
-    /// Wrapper around [`QVariant(const QVariantList &)`][ctor] constructor.
+impl From<QDate> for QVariant {
+    /// Wrapper around [`QVariant(const QDate &)`][ctor] constructor.
     ///
-    /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-21
-    fn from(a: QVariantList) -> QVariant {
-        cpp!(unsafe [a as "QVariantList"] -> QVariant as "QVariant" {
+    /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-18
+    fn from(a: QDate) -> Self {
+        cpp!(unsafe [a as "QDate"] -> QVariant as "QVariant" {
             return QVariant(a);
         })
     }
 }
-impl From<i32> for QVariant {
-    /// Wrapper around [`QVariant(int)`][ctor] constructor.
+// TODO: QVariant::QVariant(QChar c)
+// TODO: QVariant::QVariant(const QStringList &val)
+// TODO?: QVariant::QVariant(QLatin1String val)
+impl From<QString> for QVariant {
+    /// Wrapper around [`QVariant(const QString &)`][ctor] constructor.
     ///
-    /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-4
-    fn from(a: i32) -> QVariant {
-        cpp!(unsafe [a as "int"] -> QVariant as "QVariant" {
+    /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-14
+    fn from(a: QString) -> Self {
+        cpp!(unsafe [a as "QString"] -> QVariant as "QVariant" {
             return QVariant(a);
         })
     }
 }
-impl From<u32> for QVariant {
-    /// Wrapper around [`QVariant(uint)`][ctor] constructor.
+// TODO: QVariant::QVariant(const QBitArray &val)
+impl From<QByteArray> for QVariant {
+    /// Wrapper around [`QVariant(const QByteArray &)`][ctor] constructor.
     ///
-    /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-5
-    fn from(a: u32) -> QVariant {
-        cpp!(unsafe [a as "uint"] -> QVariant as "QVariant" {
+    /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-12
+    fn from(a: QByteArray) -> Self {
+        cpp!(unsafe [a as "QByteArray"] -> QVariant as "QVariant" {
             return QVariant(a);
         })
     }
 }
-impl From<i64> for QVariant {
-    /// Wrapper around [`QVariant(int)`][ctor] constructor.
+impl<'a> From<&'a CStr> for QVariant {
+    /// Wrapper around [`QVariant(const char *val)`][ctor] constructor.
     ///
-    /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-4
-    fn from(a: i64) -> QVariant {
-        cpp!(unsafe [a as "qlonglong"] -> QVariant as "QVariant" {
-            return QVariant(a);
-        })
-    }
-}
-impl From<u64> for QVariant {
-    /// Wrapper around [`QVariant(uint)`][ctor] constructor.
-    ///
-    /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-5
-    fn from(a: u64) -> QVariant {
-        cpp!(unsafe [a as "qulonglong"] -> QVariant as "QVariant" {
-            return QVariant(a);
+    /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-11
+    fn from(a: &'a CStr) -> Self {
+        // SAFETY: The variant creates a deep copy of val into a QString
+        let val = a.as_ptr();
+        cpp!(unsafe [val as "const char*"] -> QVariant as "QVariant" {
+            return QVariant(val);
         })
     }
 }
@@ -814,7 +1190,7 @@ impl From<f32> for QVariant {
     /// Wrapper around [`QVariant(float)`][ctor] constructor.
     ///
     /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-10
-    fn from(a: f32) -> QVariant {
+    fn from(a: f32) -> Self {
         cpp!(unsafe [a as "float"] -> QVariant as "QVariant" {
             return QVariant(a);
         })
@@ -824,7 +1200,7 @@ impl From<f64> for QVariant {
     /// Wrapper around [`QVariant(double)`][ctor] constructor.
     ///
     /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-9
-    fn from(a: f64) -> QVariant {
+    fn from(a: f64) -> Self {
         cpp!(unsafe [a as "double"] -> QVariant as "QVariant" {
             return QVariant(a);
         })
@@ -834,18 +1210,119 @@ impl From<bool> for QVariant {
     /// Wrapper around [`QVariant(bool)`][ctor] constructor.
     ///
     /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-8
-    fn from(a: bool) -> QVariant {
+    fn from(a: bool) -> Self {
         cpp!(unsafe [a as "bool"] -> QVariant as "QVariant" {
             return QVariant(a);
         })
     }
 }
+impl From<u64> for QVariant {
+    /// Wrapper around [`QVariant(qulonglong)`][ctor] constructor.
+    ///
+    /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-7
+    fn from(a: u64) -> Self {
+        cpp!(unsafe [a as "qulonglong"] -> QVariant as "QVariant" {
+            return QVariant(a);
+        })
+    }
+}
+impl From<i64> for QVariant {
+    /// Wrapper around [`QVariant(qlonglong)`][ctor] constructor.
+    ///
+    /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-6
+    fn from(a: i64) -> Self {
+        cpp!(unsafe [a as "qlonglong"] -> QVariant as "QVariant" {
+            return QVariant(a);
+        })
+    }
+}
+impl From<u32> for QVariant {
+    /// Wrapper around [`QVariant(uint)`][ctor] constructor.
+    ///
+    /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-5
+    fn from(a: u32) -> Self {
+        cpp!(unsafe [a as "uint"] -> QVariant as "QVariant" {
+            return QVariant(a);
+        })
+    }
+}
+impl From<i32> for QVariant {
+    /// Wrapper around [`QVariant(int)`][ctor] constructor.
+    ///
+    /// [ctor]: https://doc.qt.io/qt-5/qvariant.html#QVariant-4
+    fn from(a: i32) -> Self {
+        cpp!(unsafe [a as "int"] -> QVariant as "QVariant" {
+            return QVariant(a);
+        })
+    }
+}
+// TODO?: QVariant::QVariant(QDataStream &s)
+// XXX: QVariant::QVariant(const QVariant &p) is implemented by cpp! macro
+// TODO?: QVariant::QVariant(int typeId, const void *copy)
+// TODO: QVariant::QVariant(QVariant::Type type)
 impl<'a, T> From<&'a T> for QVariant
 where
     T: Into<QVariant> + Clone,
 {
-    fn from(a: &'a T) -> QVariant {
+    fn from(a: &'a T) -> Self {
         (*a).clone().into()
+    }
+}
+
+#[cfg(test)]
+mod test_qvariant {
+    use super::*;
+
+    #[test]
+    fn invalid() {
+        // Facts: default constructor "Constructs an invalid variant."
+        // https://doc.qt.io/qt-5/qvariant.html#QVariant
+        let v = QVariant::default();
+        assert!(!v.is_valid());
+        // An Invalid variant returns 0. Rust wrapper returns None.
+        // https://doc.qt.io/qt-5/qvariant.html#typeName
+        assert_eq!(v.type_name(), None);
+
+        let mut v = QVariant::from(QString::from("Yahaha!"));
+        // TODO: replace with QMetaType::UInt once we have something like that in this crate
+        let uint_type = 3_i32;
+        // According to QVariant::canConvert(int) rules, QString can be converted to UInt,
+        assert!(v.can_convert(uint_type));
+        // but result of such an attempt may fail miserably.
+        assert_eq!(v.to_uint(), None);
+
+        // It may even look like we failed
+        assert!(!v.convert(uint_type));
+        // but the type has changed
+        assert_eq!(v.user_type(), uint_type);
+        assert_eq!(v.type_name(), Some(unsafe { CStr::from_bytes_with_nul_unchecked(b"uint\0") })); // SAFETY: trailing nul is here
+        // and it is even valid
+        assert!(v.is_valid());
+        // only because the value was default constructed as zero.
+        assert_eq!(v.to_uint(), Some(0));
+    }
+
+    #[test]
+    fn integers() {
+        // the purpose here is to test whether passing `bool *ok` really works.
+        let v_42 = QVariant::from(42_u32);
+        assert_eq!(v_42.to_uint(), Some(42_u32));
+        assert_eq!(v_42.to_ulonglong(), Some(42_u64));
+
+        let v_str = QVariant::from(QString::from("Yahaha!"));
+        assert_eq!(v_str.to_uint(), None);
+        assert_eq!(v_str.to_ulonglong(), None);
+    }
+
+    #[test]
+    fn swapping() {
+        let mut v_1 = QVariant::from(42_u32);
+        let mut v_2 = QVariant::from(QString::from("Yahaha!"));
+
+        v_1.swap(&mut v_2);
+
+        assert_eq!(v_1.to_string(), "Yahaha!");
+        assert_eq!(v_2.to_uint(), Some(42_u32));
     }
 }
 
@@ -974,8 +1451,9 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+mod test_qvariantlist {
     use super::*;
+
     #[test]
     fn test_qvariantlist() {
         let mut q = QVariantList::default();
@@ -1186,7 +1664,7 @@ impl QColor {
     ///
     /// # Wrapper-specific
     ///
-    /// Same as [`from_rgb_f`][], but accept an alpha value
+    /// Same as [`from_rgb_f`][], but accept an alpha value.
     ///
     /// [ctor]: https://doc.qt.io/qt-5/qcolor.html#fromRgbF
     /// [`from_rgb_f`]: #method.from_rgb_f
